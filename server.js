@@ -5,42 +5,50 @@ const { v5: uuidv5 } = require("uuid");
 
 const app = express();
 
-// Twilio sends form-urlencoded by default
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 const { MessagingResponse } = twilio.twiml;
 
-// Keep this constant forever (or set it as env var)
 const CHAT_NAMESPACE =
   process.env.CHAT_NAMESPACE || "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
-// In-memory cache so we don't create the same chat every message (resets on deploy)
-const initializedChats = new Set();
-
-function requireEnv(name) {
+function hasEnv(name) {
   return typeof process.env[name] === "string" && process.env[name].trim().length > 0;
 }
 
-async function ensureChatExists(chatId) {
-  if (initializedChats.has(chatId)) return;
+function synthHeaders() {
+  return {
+    Authorization: `Bearer ${process.env.SYNTHFLOW_API_KEY}`,
+    "Content-Type": "application/json",
+  };
+}
 
+async function createChat(chatId) {
+  // Create/initialize chat with your agent/model
   const url = `https://api.synthflow.ai/v2/chat/${chatId}`;
-  const bodyObj = { model_id: process.env.SYNTHFLOW_AGENT_ID };
-  const bodyStr = JSON.stringify(bodyObj);
+  const body = JSON.stringify({ model_id: process.env.SYNTHFLOW_AGENT_ID });
 
-  await axios({
+  return axios({
     method: "POST",
     url,
-    data: bodyStr,
-    headers: {
-      Authorization: `Bearer ${process.env.SYNTHFLOW_API_KEY}`,
-      "Content-Type": "application/json",
-    },
+    data: body,
+    headers: synthHeaders(),
     timeout: 12000,
   });
+}
 
-  initializedChats.add(chatId);
+async function sendMessage(chatId, message) {
+  const url = `https://api.synthflow.ai/v2/chat/${chatId}/messages`;
+  const body = JSON.stringify({ message });
+
+  return axios({
+    method: "POST",
+    url,
+    data: body,
+    headers: synthHeaders(),
+    timeout: 12000,
+  });
 }
 
 app.post("/whatsapp", async (req, res) => {
@@ -51,41 +59,51 @@ app.post("/whatsapp", async (req, res) => {
 
   const twiml = new MessagingResponse();
 
-  if (!requireEnv("SYNTHFLOW_API_KEY") || !requireEnv("SYNTHFLOW_AGENT_ID")) {
+  if (!hasEnv("SYNTHFLOW_API_KEY") || !hasEnv("SYNTHFLOW_AGENT_ID")) {
     twiml.message("Setup issue: missing SYNTHFLOW_API_KEY or SYNTHFLOW_AGENT_ID.");
     res.type("text/xml");
     return res.send(twiml.toString());
   }
 
-  // If user sends media/sticker, Body can be empty
   const safeMsg = incomingMsg.length
     ? incomingMsg
     : "User sent something with no text (maybe a photo/sticker). Ask what they need.";
 
-  // Deterministic UUID per WhatsApp sender
+  // Stable chat id per WhatsApp user
   const chatId = uuidv5(from, CHAT_NAMESPACE);
 
   try {
-    // 1) Ensure chat exists
-    await ensureChatExists(chatId);
+    // 1) Try send first (best: avoids config conflict)
+    let synthRes;
+    try {
+      synthRes = await sendMessage(chatId, safeMsg);
+    } catch (err) {
+      const status = err?.response?.status;
+      const data = err?.response?.data;
 
-    // 2) Send message (FORCE JSON STRING)
-    const url = `https://api.synthflow.ai/v2/chat/${chatId}/messages`;
-    const payloadObj = { message: safeMsg };
-    const payloadStr = JSON.stringify(payloadObj);
+      // If chat doesn't exist, create then send again
+      const description = data?.detail?.description || data?.description || "";
+      const notFound =
+        status === 404 ||
+        /not found/i.test(description) ||
+        /chat.*does not exist/i.test(description);
 
-    console.log("OUTBOUND_TO_SYNTHFLOW", { url, payloadObj });
+      if (notFound) {
+        await createChat(chatId);
+        synthRes = await sendMessage(chatId, safeMsg);
+      } else {
+        // If chat exists with different config, DO NOT recreate — just send again
+        const conflict =
+          status === 400 && /already exists with different configuration/i.test(description);
 
-    const synthRes = await axios({
-      method: "POST",
-      url,
-      data: payloadStr,
-      headers: {
-        Authorization: `Bearer ${process.env.SYNTHFLOW_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 12000,
-    });
+        if (conflict) {
+          // just attempt message send again without creating chat
+          synthRes = await sendMessage(chatId, safeMsg);
+        } else {
+          throw err;
+        }
+      }
+    }
 
     const reply =
       synthRes.data?.response?.agent_message ||
@@ -102,9 +120,6 @@ app.post("/whatsapp", async (req, res) => {
       err?.response?.status,
       err?.response?.data || err.message
     );
-
-    // allow retry of chat init after any failure
-    initializedChats.delete(chatId);
 
     twiml.message("Sorry — I had a small technical issue. Please try again in a moment 🙂");
     res.type("text/xml");
