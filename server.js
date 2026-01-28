@@ -5,11 +5,13 @@ const { v5: uuidv5 } = require("uuid");
 
 const app = express();
 
+// Twilio sends form-urlencoded by default
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 const { MessagingResponse } = twilio.twiml;
 
+// Keep this constant forever (or set it as env var)
 const CHAT_NAMESPACE =
   process.env.CHAT_NAMESPACE || "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
@@ -25,6 +27,7 @@ function synthHeaders() {
 }
 
 async function createChat(chatId) {
+  // Create/initialize chat with your agent/model
   const url = `https://api.synthflow.ai/v2/chat/${chatId}`;
   const body = JSON.stringify({ model_id: process.env.SYNTHFLOW_AGENT_ID });
 
@@ -69,10 +72,7 @@ function isChatNotFound(err) {
 function isChatEnded(err) {
   const status = err?.response?.status;
   const desc = extractDescription(err);
-  return (
-    status === 400 &&
-    /chat has ended/i.test(desc)
-  );
+  return status === 400 && /chat has ended/i.test(desc);
 }
 
 function isConfigConflict(err) {
@@ -95,14 +95,13 @@ app.post("/whatsapp", async (req, res) => {
     return res.send(twiml.toString());
   }
 
+  // If user sends media/sticker, Body can be empty
   const safeMsg = incomingMsg.length
     ? incomingMsg
     : "User sent something with no text (maybe a photo/sticker). Ask what they need.";
 
-  // Base chat id per WhatsApp user (stable)
+  // Stable base chat id per WhatsApp user
   const baseChatId = uuidv5(from, CHAT_NAMESPACE);
-
-  // Default chat id = base
   let chatId = baseChatId;
 
   try {
@@ -118,13 +117,11 @@ app.post("/whatsapp", async (req, res) => {
         synthRes = await sendMessage(chatId, safeMsg);
       } else if (isChatEnded(err)) {
         // Chat ended: create a NEW chat id and continue
-        const newChatId = uuidv5(`${from}:${Date.now()}`, CHAT_NAMESPACE);
-        chatId = newChatId;
-
+        chatId = uuidv5(`${from}:${Date.now()}`, CHAT_NAMESPACE);
         await createChat(chatId);
         synthRes = await sendMessage(chatId, safeMsg);
       } else if (isConfigConflict(err)) {
-        // Don't recreate, just try sending again (usually works)
+        // Don't recreate, just try sending again
         synthRes = await sendMessage(chatId, safeMsg);
       } else {
         throw err;
@@ -152,5 +149,8 @@ app.get("/", (req, res) => {
   res.send("SplashyBot is running!");
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("Server running on port", PORT));
+// ✅ Render needs PORT binding + 0.0.0.0
+const PORT = Number(process.env.PORT || 10000);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("Server running on port", PORT);
+});
