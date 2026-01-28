@@ -25,7 +25,6 @@ function synthHeaders() {
 }
 
 async function createChat(chatId) {
-  // Create/initialize chat with your agent/model
   const url = `https://api.synthflow.ai/v2/chat/${chatId}`;
   const body = JSON.stringify({ model_id: process.env.SYNTHFLOW_AGENT_ID });
 
@@ -51,6 +50,37 @@ async function sendMessage(chatId, message) {
   });
 }
 
+function extractDescription(err) {
+  const data = err?.response?.data;
+  return (
+    data?.detail?.description ||
+    data?.description ||
+    (typeof data === "string" ? data : "") ||
+    ""
+  );
+}
+
+function isChatNotFound(err) {
+  const status = err?.response?.status;
+  const desc = extractDescription(err);
+  return status === 404 || /not found/i.test(desc) || /does not exist/i.test(desc);
+}
+
+function isChatEnded(err) {
+  const status = err?.response?.status;
+  const desc = extractDescription(err);
+  return (
+    status === 400 &&
+    /chat has ended/i.test(desc)
+  );
+}
+
+function isConfigConflict(err) {
+  const status = err?.response?.status;
+  const desc = extractDescription(err);
+  return status === 400 && /already exists with different configuration/i.test(desc);
+}
+
 app.post("/whatsapp", async (req, res) => {
   const incomingMsg = (req.body?.Body || "").trim();
   const from = (req.body?.From || "").trim();
@@ -69,39 +99,35 @@ app.post("/whatsapp", async (req, res) => {
     ? incomingMsg
     : "User sent something with no text (maybe a photo/sticker). Ask what they need.";
 
-  // Stable chat id per WhatsApp user
-  const chatId = uuidv5(from, CHAT_NAMESPACE);
+  // Base chat id per WhatsApp user (stable)
+  const baseChatId = uuidv5(from, CHAT_NAMESPACE);
+
+  // Default chat id = base
+  let chatId = baseChatId;
 
   try {
-    // 1) Try send first (best: avoids config conflict)
     let synthRes;
+
     try {
+      // Try sending first
       synthRes = await sendMessage(chatId, safeMsg);
     } catch (err) {
-      const status = err?.response?.status;
-      const data = err?.response?.data;
-
-      // If chat doesn't exist, create then send again
-      const description = data?.detail?.description || data?.description || "";
-      const notFound =
-        status === 404 ||
-        /not found/i.test(description) ||
-        /chat.*does not exist/i.test(description);
-
-      if (notFound) {
+      if (isChatNotFound(err)) {
+        // Create then resend
         await createChat(chatId);
         synthRes = await sendMessage(chatId, safeMsg);
-      } else {
-        // If chat exists with different config, DO NOT recreate — just send again
-        const conflict =
-          status === 400 && /already exists with different configuration/i.test(description);
+      } else if (isChatEnded(err)) {
+        // Chat ended: create a NEW chat id and continue
+        const newChatId = uuidv5(`${from}:${Date.now()}`, CHAT_NAMESPACE);
+        chatId = newChatId;
 
-        if (conflict) {
-          // just attempt message send again without creating chat
-          synthRes = await sendMessage(chatId, safeMsg);
-        } else {
-          throw err;
-        }
+        await createChat(chatId);
+        synthRes = await sendMessage(chatId, safeMsg);
+      } else if (isConfigConflict(err)) {
+        // Don't recreate, just try sending again (usually works)
+        synthRes = await sendMessage(chatId, safeMsg);
+      } else {
+        throw err;
       }
     }
 
@@ -115,12 +141,7 @@ app.post("/whatsapp", async (req, res) => {
     res.type("text/xml");
     return res.send(twiml.toString());
   } catch (err) {
-    console.error(
-      "SYNTHFLOW_ERROR",
-      err?.response?.status,
-      err?.response?.data || err.message
-    );
-
+    console.error("SYNTHFLOW_ERROR", err?.response?.status, err?.response?.data || err.message);
     twiml.message("Sorry — I had a small technical issue. Please try again in a moment 🙂");
     res.type("text/xml");
     return res.send(twiml.toString());
