@@ -1,4 +1,6 @@
 const express = require("express");
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 const bodyParser = require("body-parser");
 const axios = require("axios");
 
