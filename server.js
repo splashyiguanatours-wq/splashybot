@@ -4,56 +4,62 @@ const twilio = require("twilio");
 
 const app = express();
 
+// Twilio sends form-urlencoded by default
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-const MessagingResponse = twilio.twiml.MessagingResponse;
+const { MessagingResponse } = twilio.twiml;
 
 app.post("/whatsapp", async (req, res) => {
-  const incomingMsg = req.body.Body;
-  const from = req.body.From;
+  const incomingMsg = (req.body?.Body || "").trim();
+  const from = (req.body?.From || "").trim();
 
-  console.log("Incoming message:", incomingMsg);
+  console.log("INBOUND", { from, incomingMsg });
 
   const twiml = new MessagingResponse();
 
+  if (!incomingMsg) {
+    twiml.message("Please type a message and send again 🙂");
+    res.type("text/xml");
+    return res.send(twiml.toString());
+  }
+
+  if (!process.env.SYNTHFLOW_API_KEY || !process.env.SYNTHFLOW_AGENT_ID) {
+    twiml.message("Setup issue: missing SYNTHFLOW_API_KEY or SYNTHFLOW_AGENT_ID.");
+    res.type("text/xml");
+    return res.send(twiml.toString());
+  }
+
   try {
-    const aiResponse = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are Splashy Iguana Tours' friendly WhatsApp assistant. Answer questions about the amphibious tour, pricing, safety, bookings, and experience in a warm, helpful tone.",
-          },
-          {
-            role: "user",
-            content: incomingMsg,
-          },
-        ],
-      },
+    // 1) Send message to Synthflow
+    const chatId = encodeURIComponent(from); // keep it simple
+    const synthRes = await axios.post(
+      `https://api.synthflow.ai/v2/chat/${chatId}/messages`,
+      { message: incomingMsg },
       {
         headers: {
+          Authorization: `Bearer ${process.env.SYNTHFLOW_API_KEY}`,
           "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         },
+        timeout: 20000, // Render allows this, Twilio Functions did not
       }
     );
 
-    const reply = aiResponse.data.choices[0].message.content;
+    const reply =
+      synthRes.data?.response?.agent_message ||
+      synthRes.data?.agent_message ||
+      synthRes.data?.message ||
+      "Sorry — I had a small technical issue. Please try again.";
 
     twiml.message(reply);
-  } catch (error) {
-    console.error("AI Error:", error.response?.data || error.message);
-    twiml.message(
-      "Sorry — I had a small technical issue. Please try again in a moment."
-    );
+    res.type("text/xml");
+    return res.send(twiml.toString());
+  } catch (err) {
+    console.error("SYNTHFLOW_ERROR", err?.response?.status, err?.response?.data || err.message);
+    twiml.message("Sorry — I had a small technical issue. Please try again in a moment 🙂");
+    res.type("text/xml");
+    return res.send(twiml.toString());
   }
-
-  res.writeHead(200, { "Content-Type": "text/xml" });
-  res.end(twiml.toString());
 });
 
 app.get("/", (req, res) => {
@@ -61,6 +67,4 @@ app.get("/", (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
-});
+app.listen(PORT, () => console.log("Server running on port", PORT));
