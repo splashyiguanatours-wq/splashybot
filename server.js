@@ -1,48 +1,66 @@
 const express = require("express");
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
-const bodyParser = require("body-parser");
 const axios = require("axios");
+const twilio = require("twilio");
 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+
+const MessagingResponse = twilio.twiml.MessagingResponse;
 
 app.post("/whatsapp", async (req, res) => {
-  try {
-    const userMessage = req.body.Body;
-    const from = req.body.From;
+  const incomingMsg = req.body.Body;
+  const from = req.body.From;
 
-    const response = await axios.post(
-      `https://api.synthflow.ai/v2/chat/${from}/messages`,
-      { message: userMessage },
+  console.log("Incoming message:", incomingMsg);
+
+  const twiml = new MessagingResponse();
+
+  try {
+    const aiResponse = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are Splashy Iguana Tours' friendly WhatsApp assistant. Answer questions about the amphibious tour, pricing, safety, bookings, and experience in a warm, helpful tone.",
+          },
+          {
+            role: "user",
+            content: incomingMsg,
+          },
+        ],
+      },
       {
         headers: {
-          Authorization: `Bearer ${process.env.SYNTHFLOW_API_KEY}`,
           "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         },
       }
     );
 
-    const reply =
-      response.data?.response?.agent_message ||
-      response.data?.agent_message ||
-      "Sorry, I had a small technical issue.";
+    const reply = aiResponse.data.choices[0].message.content;
 
-    res.type("text/xml");
-    res.send(`<Response><Message>${reply}</Message></Response>`);
+    twiml.message(reply);
   } catch (error) {
-    console.error(error.message);
-    res.type("text/xml");
-    res.send(
-      `<Response><Message>Sorry — I had a small technical issue. Please try again in a moment 🙂</Message></Response>`
+    console.error("AI Error:", error.response?.data || error.message);
+    twiml.message(
+      "Sorry — I had a small technical issue. Please try again in a moment."
     );
   }
+
+  res.writeHead(200, { "Content-Type": "text/xml" });
+  res.end(twiml.toString());
 });
 
 app.get("/", (req, res) => {
   res.send("SplashyBot is running!");
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log("Server running on port", PORT);
+});
